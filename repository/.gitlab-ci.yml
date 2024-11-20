@@ -1,0 +1,100 @@
+variables:
+  AWS_ACCOUNT: 0000000000000 # should be change to real account id
+  AWS_REGION: us-east-1
+  CONTAINER_REGISTRY: ${AWS_ACCOUNT}.dkr.ecr.us-east-1.amazonaws.com
+  APP_NAME: topsurvey
+  NAMESPACE: topsurvey
+  ECR_REPOSITORY: applications/${APP_NAME}
+  IMAGE_TAG: latest
+  DOCKERFILE_PATH: Dockerfile
+  DOCKER_CONTEXT: "."
+  DOCKER_EXTRA_ARGS: ""
+
+stages:
+  - configure
+  - test
+  - build
+  - deploy
+
+
+Verify-ecr-repo:
+  image: ubuntu:18.04
+  stage: configure
+  only:
+    - master
+    - main
+  before_script:
+    - |
+      echo "Installing dependencies"
+      apt update -y
+      apt-get install jq curl unzip tzdata -y
+      apt install awscli -y
+  script:
+    - |
+      export FOUND=$(aws ecr  describe-repositories | jq .repositories[].repositoryName | grep $ECR_REPOSITORY -c)
+      echo $FOUND
+      if [ "$FOUND" -eq "0" ]; then
+        echo "Creating repository $ECR_REPOSITORY";
+        aws ecr create-repository --repository-name $ECR_REPOSITORY
+      fi          
+
+
+
+Unit-tests:
+  image: ubuntu:18.04
+  stage: test
+  only:
+    - master
+    - main
+  script:
+    - |
+      echo "Running unit tests"
+
+
+Build:
+  stage: build
+  only:
+    - master
+    - main
+  image: 
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  before_script:
+    - export
+    - echo "----------------------------------------------------------"
+    - echo "{\"credsStore\":\"ecr-login\",\"credHelpers\":{\"$CONTAINER_REGISTRY\":\"ecr-login\"}}"
+    - mkdir -p /kaniko/.docker
+    - cd /kaniko
+    - echo "{\"credsStore\":\"ecr-login\",\"credHelpers\":{\"$CONTAINER_REGISTRY\":\"ecr-login\"}}" > /kaniko/.docker/config.json
+    - cat /kaniko/.docker/config.json
+  script:
+     - echo "Setting IFS to null to avoid word splitting..."
+     - export COMMAND="/kaniko/executor ${DOCKER_EXTRA_ARGS} --context $CI_PROJECT_DIR/$DOCKER_CONTEXT --dockerfile $CI_PROJECT_DIR/$DOCKERFILE_PATH --destination ${CONTAINER_REGISTRY}/${ECR_REPOSITORY}:$IMAGE_TAG"
+     - echo "Running Kaniko command $COMMAND"
+     - eval "$COMMAND"
+     - echo "Image pulled with success!"
+
+
+Deploy:
+  stage: deploy
+  only:
+    - master
+    - main
+  before_script:
+    - |
+      echo "Getting k8s cluster credentials..."
+      aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
+      cat ~/.kube/config
+    - |
+      # Check if the namespace exists
+      if kubectl get namespace "$NAMESPACE" &> /dev/null; then
+        echo "Namespace '$NAMESPACE' already exists."
+      else
+        # Create the namespace
+        kubectl create namespace "$NAMESPACE"
+        echo "Namespace '$NAMESPACE' created successfully."
+      fi
+
+  script:
+    - helm upgrade ${APP_NAME} ./infra --install --values=./infra/values.yaml --namespace=${NAMESPACE} --force
+    
